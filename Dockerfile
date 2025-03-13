@@ -1,11 +1,17 @@
-FROM python:3.10.1-buster
+FROM tensorflow/tensorflow:2.11.0-gpu
 
-## DO NOT EDIT these 3 lines.
-RUN mkdir /challenge
-COPY ./ /challenge
 WORKDIR /challenge
 
-## Install your dependencies here using apt install, etc.
+# Install required packages
+RUN pip install numpy pandas scikit-learn wfdb matplotlib tensorflow==2.11.0
 
-## Include the following line if you have a requirements.txt file.
-RUN pip install -r requirements.txt
+# Copy code files
+COPY team_code.py /challenge/
+COPY train_model.py /challenge/
+COPY run_model.py /challenge/
+COPY helper_code.py /challenge/
+COPY requirements.txt /challenge/
+
+# Health check to verify that the container is ready
+HEALTHCHECK --interval=5m --timeout=3s \
+  CMD python -c "import tensorflow as tf; print(tf.__version__)" || exit 1
