@@ -251,7 +251,7 @@ def train_model(data_directory, model_directory):
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=10,  # Reduce epochs for quicker training 
+        epochs=30,  # Reduce epochs for quicker training 
         batch_size=32,
         callbacks=[early_stopping]
     )
