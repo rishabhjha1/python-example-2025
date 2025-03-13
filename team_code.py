@@ -9,140 +9,302 @@
 #
 ################################################################################
 
-import joblib
-import numpy as np
+
 import os
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-import sys
+import numpy as np
+import pandas as pd
+import wfdb
+import ast
+import tensorflow as tf
+from tensorflow.keras.models import Model, load_model as keras_load_model
+from tensorflow.keras.layers import Input, Conv1D, BatchNormalization, Activation, Add, MaxPooling1D
+from tensorflow.keras.layers import GlobalAveragePooling1D, Dense, Dropout
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 
-from helper_code import *
+# Define a residual block for ResNet architecture
+def residual_block(x, filters, kernel_size=3, stride=1, conv_shortcut=False):
+    shortcut = x
 
-################################################################################
-#
-# Required functions. Edit these functions to add your code, but do not change the arguments for the functions.
-#
-################################################################################
+    if conv_shortcut:
+        shortcut = Conv1D(filters, 1, strides=stride, padding='same')(shortcut)
+        shortcut = BatchNormalization()(shortcut)
 
-# Train your models. This function is *required*. You should edit this function to add your code, but do *not* change the arguments
-# of this function. If you do not train one of the models, then you can return None for the model.
+    # First convolution layer
+    x = Conv1D(filters, kernel_size, strides=stride, padding='same')(x)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
 
-# Train your model.
-def train_model(data_folder, model_folder, verbose):
-    # Find the data files.
-    if verbose:
-        print('Finding the Challenge data...')
+    # Second convolution layer
+    x = Conv1D(filters, kernel_size, padding='same')(x)
+    x = BatchNormalization()(x)
 
-    records = find_records(data_folder)
-    num_records = len(records)
+    # Add the shortcut (identity) connection
+    x = Add()([x, shortcut])
+    x = Activation('relu')(x)
 
-    if num_records == 0:
-        raise FileNotFoundError('No data were provided.')
+    return x
 
-    # Extract the features and labels from the data.
-    if verbose:
-        print('Extracting features and labels from the data...')
+# Build a ResNet model for ECG classification
+def build_resnet_model(input_shape, num_classes=1):
+    inputs = Input(shape=input_shape)
 
-    features = np.zeros((num_records, 6), dtype=np.float64)
-    labels = np.zeros(num_records, dtype=bool)
+    # Initial convolution
+    x = Conv1D(64, 7, strides=2, padding='same')(inputs)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    x = MaxPooling1D(pool_size=3, strides=2, padding='same')(x)
 
-    # Iterate over the records.
-    for i in range(num_records):
-        if verbose:
-            width = len(str(num_records))
-            print(f'- {i+1:>{width}}/{num_records}: {records[i]}...')
+    # Residual blocks
+    # First stack - 64 filters
+    x = residual_block(x, 64, conv_shortcut=True)
+    x = residual_block(x, 64)
+    x = residual_block(x, 64)
 
-        record = os.path.join(data_folder, records[i])
-        features[i] = extract_features(record)
-        labels[i] = load_label(record)
+    # Second stack - 128 filters
+    x = residual_block(x, 128, stride=2, conv_shortcut=True)
+    x = residual_block(x, 128)
+    x = residual_block(x, 128)
 
-    # Train the models.
-    if verbose:
-        print('Training the model on the data...')
+    # Third stack - 256 filters
+    x = residual_block(x, 256, stride=2, conv_shortcut=True)
+    x = residual_block(x, 256)
+    x = residual_block(x, 256)
 
-    # This very simple model trains a random forest model with very simple features.
+    # Global pooling and output
+    x = GlobalAveragePooling1D()(x)
+    x = Dropout(0.5)(x)
 
-    # Define the parameters for the random forest classifier and regressor.
-    n_estimators = 12  # Number of trees in the forest.
-    max_leaf_nodes = 34  # Maximum number of leaf nodes in each tree.
-    random_state = 56  # Random state; set for reproducibility.
+    if num_classes == 1:
+        outputs = Dense(1, activation='sigmoid')(x)  # Binary classification
+    else:
+        outputs = Dense(num_classes, activation='softmax')(x)  # Multi-class
 
-    # Fit the model.
-    model = RandomForestClassifier(
-        n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(features, labels)
+    model = Model(inputs, outputs)
 
-    # Create a folder for the model if it does not already exist.
-    os.makedirs(model_folder, exist_ok=True)
+    # Compile model
+    if num_classes == 1:
+        model.compile(
+            optimizer='adam',
+            loss='binary_crossentropy',
+            metrics=['accuracy', tf.keras.metrics.AUC(), tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
+        )
+    else:
+        model.compile(
+            optimizer='adam',
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
 
-    # Save the model.
-    save_model(model_folder, model)
-
-    if verbose:
-        print('Done.')
-        print()
-
-# Load your trained models. This function is *required*. You should edit this function to add your code, but do *not* change the
-# arguments of this function. If you do not train one of the models, then you can return None for the model.
-def load_model(model_folder, verbose):
-    model_filename = os.path.join(model_folder, 'model.sav')
-    model = joblib.load(model_filename)
     return model
 
-# Run your trained model. This function is *required*. You should edit this function to add your code, but do *not* change the
-# arguments of this function.
-def run_model(record, model, verbose):
-    # Load the model.
-    model = model['model']
-
-    # Extract the features.
-    features = extract_features(record)
-    features = features.reshape(1, -1)
-
-    # Get the model outputs.
-    binary_output = model.predict(features)[0]
-    probability_output = model.predict_proba(features)[0][1]
-
-    return binary_output, probability_output
-
-################################################################################
-#
-# Optional functions. You can change or remove these functions and/or add new functions.
-#
-################################################################################
-
-# Extract your features.
-def extract_features(record):
-    header = load_header(record)
-    age = get_age(header)
-    sex = get_sex(header)
-
-    one_hot_encoding_sex = np.zeros(3, dtype=bool)
-    if sex == 'Female':
-        one_hot_encoding_sex[0] = 1
-    elif sex == 'Male':
-        one_hot_encoding_sex[1] = 1
+# Function to load the raw ECG data
+def load_raw_data(df, sampling_rate, data_path):
+    """
+    Load raw ECG data from WFDB files.
+    """
+    if sampling_rate == 100:
+        data = [wfdb.rdsamp(os.path.join(data_path, f)) for f in df.filename_lr]
     else:
-        one_hot_encoding_sex[2] = 1
+        data = [wfdb.rdsamp(os.path.join(data_path, f)) for f in df.filename_hr]
+    data = np.array([signal for signal, meta in data])
+    return data
 
-    signal, fields = load_signals(record)
+# Clean SCP codes by removing 'NORM' (normal) labels
+def clean_scp_codes(dicts):
+    """
+    Clean the diagnostic codes dictionary by removing 'NORM' (normal) labels.
+    """
+    final = {}
+    for k, v in dicts.items():
+        if k == "NORM":
+            continue
+        else:
+            final[k] = v
+    return final
 
-    # TO-DO: Update to compute per-lead features. Check lead order and update and use functions for reordering leads as needed.
+# Create binary labels for Chagas-related conditions
+def create_chagas_related_labels(df, scp_statements_df):
+    """
+    Create binary labels for Chagas-related ECG patterns.
+    """
+    # Initializing a DataFrame for our binary labels
+    chagas_labels = pd.DataFrame(index=df.index)
 
-    num_finite_samples = np.size(np.isfinite(signal))
-    if num_finite_samples > 0:
-        signal_mean = np.nanmean(signal)
-    else:
-        signal_mean = 0.0
-    if num_finite_samples > 1:
-        signal_std = np.nanstd(signal)
-    else:
-        signal_std = 0.0
+    # Mapping conditions to SCP codes from the dataset
+    chagas_related = {
+        'RBBB': ['IRBBB', 'CRBBB'],  # Right bundle branch block
+        'LAFB': ['LAFB'],            # Left anterior fascicular block
+        'AVB': ['1AVB', '2AVB', '3AVB'],  # AV blocks
+        'PVC': ['PVC'],              # Premature ventricular contractions
+        'STT': ['STD', 'STE', 'NDT'],  # ST-T wave changes
+        'Q_WAVE': ['IMI', 'AMI', 'LMI']  # Q waves
+    }
 
-    features = np.concatenate(([age], one_hot_encoding_sex, [signal_mean, signal_std]))
+    # Creating a binary column for each condition
+    for condition, codes in chagas_related.items():
+        chagas_labels[condition] = df.scp_codes.apply(
+            lambda x: 1 if any(code in x for code in codes) else 0)
 
-    return np.asarray(features, dtype=np.float32)
+    # Creating a "Chagas Pattern" column for cases with both RBBB and LAFB
+    chagas_labels['CHAGAS_PATTERN'] = ((chagas_labels['RBBB'] == 1) &
+                                      (chagas_labels['LAFB'] == 1)).astype(int)
 
-# Save your trained model.
-def save_model(model_folder, model):
-    d = {'model': model}
-    filename = os.path.join(model_folder, 'model.sav')
-    joblib.dump(d, filename, protocol=0)
+    return chagas_labels
+
+# Prepare data for model training
+def prepare_data(X, target_values):
+    """
+    Prepare ECG data for model training.
+    """
+    # Split into training and validation sets
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, target_values, test_size=0.2, random_state=42)
+
+    # Get dimensions
+    n_samples, n_timesteps, n_features = X.shape
+
+    # Reshape for standardization
+    X_train_flat = X_train.reshape(X_train.shape[0], n_timesteps * n_features)
+    X_val_flat = X_val.reshape(X_val.shape[0], n_timesteps * n_features)
+
+    # Standardize
+    scaler = StandardScaler()
+    X_train_flat = scaler.fit_transform(X_train_flat)
+    X_val_flat = scaler.transform(X_val_flat)
+
+    # Reshape back for CNN
+    X_train = X_train_flat.reshape(-1, n_timesteps, n_features)
+    X_val = X_val_flat.reshape(-1, n_timesteps, n_features)
+
+    return X_train, X_val, y_train, y_val, scaler
+
+def preprocess_ecg(X, scaler):
+    """
+    Preprocess ECG data using saved scaler.
+    """
+    n_samples, n_timesteps, n_features = X.shape
+    X_flat = X.reshape(n_samples, n_timesteps * n_features)
+    X_scaled = scaler.transform(X_flat)
+    X_reshaped = X_scaled.reshape(n_samples, n_timesteps, n_features)
+    return X_reshaped
+
+# Train model function required by the challenge
+def train_model(data_directory, model_directory):
+    """
+    Train model using data in data_directory and save trained model in model_directory.
+    
+    This function is required by the challenge.
+    """
+    print('Finding challenge data...')
+    # Load metadata
+    metadata_path = os.path.join(data_directory, 'ptbxl_database.csv')
+    Y = pd.read_csv(metadata_path, index_col='ecg_id')
+    
+    # Convert SCP codes from string to dictionary
+    Y.scp_codes = Y.scp_codes.apply(lambda x: ast.literal_eval(x))
+    
+    # Clean SCP codes
+    Y.scp_codes = Y.scp_codes.apply(clean_scp_codes)
+    
+    # Load the SCP statements for diagnostic mapping
+    scp_statements_path = os.path.join(data_directory, 'scp_statements.csv')
+    agg_df = pd.read_csv(scp_statements_path, index_col=0)
+    agg_df = agg_df[agg_df.diagnostic == 1]  # Keep only diagnostic statements
+    
+    print('Loading ECG data...')
+    # Load raw ECG data (using 100Hz sampling rate)
+    sampling_rate = 100
+    X = load_raw_data(Y, sampling_rate, data_directory)
+    
+    # Create Chagas-related labels
+    chagas_labels = create_chagas_related_labels(Y, agg_df)
+    
+    # Focus on CHAGAS_PATTERN (RBBB + LAFB)
+    target_col = 'CHAGAS_PATTERN'
+    target_values = chagas_labels[target_col]
+    
+    print('Preparing data...')
+    # Prepare and standardize data
+    X_train, X_val, y_train, y_val, scaler = prepare_data(X, target_values)
+    
+    # Save the scaler for use during inference
+    np.save(os.path.join(model_directory, 'scaler_mean.npy'), scaler.mean_)
+    np.save(os.path.join(model_directory, 'scaler_scale.npy'), scaler.scale_)
+    
+    # Define input shape
+    input_shape = (X_train.shape[1], X_train.shape[2])
+    
+    print('Training model...')
+    # Build and train the model
+    model = build_resnet_model(input_shape)
+    
+    # Define callbacks
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor='val_auc',
+        patience=5,
+        mode='max',
+        restore_best_weights=True
+    )
+    
+    # Train the model
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=10,  # Reduce epochs for quicker training 
+        batch_size=32,
+        callbacks=[early_stopping]
+    )
+    
+    print('Saving model...')
+    # Save the model
+    model.save(os.path.join(model_directory, 'chagas_resnet_model.h5'))
+    
+    print('Done training model.')
+
+# Load model function required by the challenge
+def load_model(model_directory):
+    """
+    Load trained model from model_directory.
+    
+    This function is required by the challenge.
+    """
+    print('Loading model...')
+    
+    # Load the keras model
+    model_path = os.path.join(model_directory, 'chagas_resnet_model.h5')
+    model = keras_load_model(model_path)
+    
+    # Load the scaler parameters
+    scaler_mean = np.load(os.path.join(model_directory, 'scaler_mean.npy'))
+    scaler_scale = np.load(os.path.join(model_directory, 'scaler_scale.npy'))
+    
+    # Recreate the scaler
+    scaler = StandardScaler()
+    scaler.mean_ = scaler_mean
+    scaler.scale_ = scaler_scale
+    
+    # Return both the model and scaler
+    return model, scaler
+
+# Run model function required by the challenge
+def run_model(model, data, recordings):
+    """
+    Run trained model on data.
+    
+    This function is required by the challenge.
+    """
+    # Unpack the model and scaler
+    keras_model, scaler = model
+    
+    # Preprocess the ECG data
+    X_processed = preprocess_ecg(recordings, scaler)
+    
+    # Make predictions
+    y_pred_prob = keras_model.predict(X_processed)
+    
+    # Convert to binary prediction (threshold at 0.5)
+    y_pred = (y_pred_prob > 0.5).astype(int)
+    
+    # Return both binary prediction and probability
+    return y_pred.flatten(), y_pred_prob.flatten()
