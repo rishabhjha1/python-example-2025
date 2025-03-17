@@ -101,12 +101,13 @@ def build_resnet_model(input_shape, num_classes=1):
 # Function to load the raw ECG data
 def load_raw_data(df, sampling_rate, data_path):
     """
-    Load raw ECG data from WFDB files in the PTB-XL dataset.
+    Load raw ECG data from WFDB files.
+    More flexible loading that can handle different directory structures.
     
     Args:
         df: DataFrame containing metadata with filenames
         sampling_rate: Sampling rate (100 or 500 Hz)
-        data_path: Base directory containing the PTB-XL dataset
+        data_path: Base directory containing the dataset
         
     Returns:
         Numpy array of ECG signal data
@@ -117,49 +118,93 @@ def load_raw_data(df, sampling_rate, data_path):
     # Determine which filenames to use based on sampling rate
     if sampling_rate == 100:
         file_suffix = '_lr'
-        record_dir = 'records100'
+        possible_record_dirs = ['records100']
     else:
         file_suffix = '_hr'
-        record_dir = 'records500'
+        possible_record_dirs = ['records500']
     
-    # Print some debug information
+    # Find the correct records directory
+    record_dir = None
+    for dir_name in possible_record_dirs:
+        if os.path.exists(os.path.join(data_path, dir_name)):
+            record_dir = dir_name
+            break
+    
+    # If standard directory doesn't exist, use the base path
+    if record_dir is None:
+        record_dir = ''
+    
     print(f"Loading ECG data from {os.path.join(data_path, record_dir)}")
-    print(f"First few filenames: {df['filename_lr' if sampling_rate == 100 else 'filename_hr'].head().tolist()}")
     
-    # Check if the record directory exists
-    if not os.path.exists(os.path.join(data_path, record_dir)):
-        raise FileNotFoundError(f"Record directory not found: {os.path.join(data_path, record_dir)}")
-    
-    # Iterate through each row in the DataFrame
-    for i, row in df.iterrows():
-        # Extract the filename based on sampling rate
-        if sampling_rate == 100:
-            filename = row['filename_lr']
+    # Check if we need to use filename from metadata or find files directly
+    if 'filename_lr' in df.columns or 'filename_hr' in df.columns:
+        # Determine column name based on sampling rate
+        filename_col = 'filename_lr' if sampling_rate == 100 else 'filename_hr'
+        
+        # Check if the column exists
+        if filename_col in df.columns:
+            print(f"Using filenames from '{filename_col}' column")
+            
+            # Iterate through each row in the DataFrame
+            for i, row in df.iterrows():
+                # Extract the filename
+                filename = row[filename_col]
+                
+                # Construct full path to the record
+                record_path = os.path.join(data_path, filename)
+                
+                # Check if file exists
+                header_path = record_path + '.hea'
+                if not os.path.exists(header_path):
+                    print(f"Warning: File not found: {header_path}")
+                    continue
+                
+                try:
+                    # Read the signal data
+                    signal, _ = wfdb.rdsamp(record_path)
+                    data.append(signal)
+                except Exception as e:
+                    print(f"Error reading {record_path}: {str(e)}")
+                    # Append a zero array to maintain index alignment
+                    if len(data) > 0:
+                        data.append(np.zeros_like(data[0]))
+                    else:
+                        # If this is the first record, we can't determine the shape
+                        print("Error reading the first record. Cannot continue.")
+                        raise
         else:
-            filename = row['filename_hr']
+            raise ValueError(f"Column '{filename_col}' not found in metadata")
+    else:
+        # Fallback: Try to find files directly in the record directory
+        print("Filename columns not found in metadata, searching for files directly")
         
-        # Construct full path to the record
-        record_path = os.path.join(data_path, filename)
+        # Get a list of all .hea files in the record directory and its subdirectories
+        wfdb_files = []
+        record_dir_path = os.path.join(data_path, record_dir)
         
-        # Check if file exists
-        header_path = record_path + '.hea'
-        if not os.path.exists(header_path):
-            print(f"Warning: File not found: {header_path}")
-            continue
+        for root, dirs, files in os.walk(record_dir_path):
+            for file in files:
+                if file.endswith('.hea'):
+                    # Get the base filename without extension
+                    base_name = os.path.splitext(file)[0]
+                    # Get the full path without extension
+                    file_path = os.path.join(root, base_name)
+                    wfdb_files.append(file_path)
         
-        try:
-            # Read the signal data
-            signal, _ = wfdb.rdsamp(record_path)
-            data.append(signal)
-        except Exception as e:
-            print(f"Error reading {record_path}: {str(e)}")
-            # Append a zero array to maintain index alignment
-            if len(data) > 0:
-                data.append(np.zeros_like(data[0]))
-            else:
-                # If this is the first record, we can't determine the shape
-                print("Error reading the first record. Cannot continue.")
-                raise
+        print(f"Found {len(wfdb_files)} WFDB files")
+        
+        # Read each file
+        for file_path in wfdb_files:
+            try:
+                signal, _ = wfdb.rdsamp(file_path)
+                data.append(signal)
+            except Exception as e:
+                print(f"Error reading {file_path}: {str(e)}")
+                if len(data) > 0:
+                    data.append(np.zeros_like(data[0]))
+                else:
+                    print("Error reading the first record. Cannot continue.")
+                    raise
     
     # Convert list to numpy array
     data = np.array(data)
@@ -168,22 +213,19 @@ def load_raw_data(df, sampling_rate, data_path):
 
 def verify_ptbxl_dataset(data_path):
     """
-    Verify that the PTB-XL dataset is properly structured.
+    Verify that the dataset contains the necessary files for training.
+    More flexible verification that doesn't require a specific PTB-XL structure.
     
     Args:
-        data_path: Base directory containing the PTB-XL dataset
+        data_path: Base directory containing the dataset
         
     Returns:
         Boolean indicating if dataset structure is valid
     """
+    # Check for required metadata files
     required_files = [
         'ptbxl_database.csv',
         'scp_statements.csv'
-    ]
-    
-    required_dirs = [
-        'records100', 
-        'records500'
     ]
     
     # Check required files
@@ -193,31 +235,35 @@ def verify_ptbxl_dataset(data_path):
             print(f"Error: Required file not found: {file_path}")
             return False
     
-    # Check required directories
-    for directory in required_dirs:
+    # Look for at least one of the record directories
+    found_records_dir = False
+    for directory in ['records500', 'records100']:
         dir_path = os.path.join(data_path, directory)
-        if not os.path.isdir(dir_path):
-            print(f"Error: Required directory not found: {dir_path}")
-            return False
+        if os.path.isdir(dir_path):
+            found_records_dir = True
+            record_dir = directory
+            break
     
-    # Check structure of records100 directory (sample check)
-    records100_path = os.path.join(data_path, 'records100')
-    subdirs = [d for d in os.listdir(records100_path) if os.path.isdir(os.path.join(records100_path, d))]
+    if not found_records_dir:
+        # If standard directories don't exist, look for any directory with ECG files
+        for item in os.listdir(data_path):
+            item_path = os.path.join(data_path, item)
+            if os.path.isdir(item_path):
+                # Check if directory contains WFDB files
+                has_wfdb_files = any(f.endswith('.hea') or f.endswith('.dat') for f in os.listdir(item_path))
+                if has_wfdb_files:
+                    found_records_dir = True
+                    record_dir = item
+                    break
     
-    if not subdirs:
-        print(f"Error: No subdirectories found in {records100_path}")
+    if not found_records_dir:
+        print(f"Error: No directory containing ECG records found in {data_path}")
         return False
     
     # Print the structure for debugging
     print(f"Dataset structure in {data_path}:")
     print(f"- Found {len(required_files)} required files")
-    print(f"- Found {len(required_dirs)} required directories")
-    print(f"- Found {len(subdirs)} subdirectories in records100")
-    
-    # Sample check of first subdir
-    first_subdir = os.path.join(records100_path, subdirs[0])
-    files_in_subdir = os.listdir(first_subdir)
-    print(f"- Sample files in {subdirs[0]}: {files_in_subdir[:5]}")
+    print(f"- Found record directory: {record_dir}")
     
     return True
 # Clean SCP codes by removing 'NORM' (normal) labels
@@ -307,7 +353,7 @@ def train_model(data_directory, model_directory, verbose=False):
     This function is required by the challenge.
     
     Args:
-        data_directory: Directory containing the PTB-XL data
+        data_directory: Directory containing the data
         model_directory: Directory to save the trained model
         verbose: Boolean indicating whether to print detailed output
     """
@@ -324,33 +370,37 @@ def train_model(data_directory, model_directory, verbose=False):
     if not os.path.exists(model_directory):
         os.makedirs(model_directory)
     
-    # Verify the dataset structure
-    print(f"Verifying PTB-XL dataset structure in {data_directory}...")
+    # Verify the dataset structure - using our more flexible verification
+    print(f"Verifying dataset structure in {data_directory}...")
     if not verify_ptbxl_dataset(data_directory):
-        raise ValueError(f"PTB-XL dataset structure is invalid in {data_directory}")
+        print(f"Warning: Dataset structure does not match typical PTB-XL structure. Attempting to continue anyway.")
     
-    # Load metadata
-    metadata_path = os.path.join(data_directory, 'ptbxl_database.csv')
-    Y = pd.read_csv(metadata_path, index_col='ecg_id')
-    
-    # Convert SCP codes from string to dictionary
-    Y.scp_codes = Y.scp_codes.apply(lambda x: ast.literal_eval(x))
-    
-    # Clean SCP codes
-    Y.scp_codes = Y.scp_codes.apply(clean_scp_codes)
-    
-    # Load the SCP statements for diagnostic mapping
-    scp_statements_path = os.path.join(data_directory, 'scp_statements.csv')
-    agg_df = pd.read_csv(scp_statements_path, index_col=0)
-    agg_df = agg_df[agg_df.diagnostic == 1]  # Keep only diagnostic statements
+    # Try to load metadata
+    try:
+        metadata_path = os.path.join(data_directory, 'ptbxl_database.csv')
+        Y = pd.read_csv(metadata_path, index_col='ecg_id')
+        
+        # Convert SCP codes from string to dictionary
+        Y.scp_codes = Y.scp_codes.apply(lambda x: ast.literal_eval(x))
+        
+        # Clean SCP codes
+        Y.scp_codes = Y.scp_codes.apply(clean_scp_codes)
+        
+        # Load the SCP statements for diagnostic mapping
+        scp_statements_path = os.path.join(data_directory, 'scp_statements.csv')
+        agg_df = pd.read_csv(scp_statements_path, index_col=0)
+        agg_df = agg_df[agg_df.diagnostic == 1]  # Keep only diagnostic statements
+    except Exception as e:
+        print(f"Error loading metadata: {str(e)}")
+        print("Attempting to continue with available data...")
     
     if verbose:
         print('Loading ECG data...')
     else:
         print('Loading ECG data...')
     
-    # Load raw ECG data (using 100Hz sampling rate)
-    sampling_rate = 100
+    # Load raw ECG data (using 500Hz sampling rate since we know that's available)
+    sampling_rate = 500
     X = load_raw_data(Y, sampling_rate, data_directory)
     
     if X.size == 0:
@@ -429,6 +479,7 @@ def train_model(data_directory, model_directory, verbose=False):
     else:
         print('Done training model.')
 
+
 def load_model(model_directory, verbose=False):
     """
     Load trained model from model_directory.
@@ -486,7 +537,7 @@ def load_model(model_directory, verbose=False):
     
     if verbose:
         print("Model loaded successfully.")
-    
+     
     # Return both the model and scaler
     return (model, scaler)
 # Run model function required by the challenge
