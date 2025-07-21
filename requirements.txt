@@ -58,6 +58,4 @@ pytest>=7.0.0
 black>=22.0.0
 flake8>=4.0.0
 
-# Jupyter notebook support (optional)
-jupyter>=1.0.0
-ipywidgets>=7.7.0
+
