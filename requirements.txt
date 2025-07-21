@@ -1,6 +1,6 @@
 # Core dependencies for PhysioNet Challenge 2025 Chagas Detection
 # PyTorch ecosystem
-torch>=2.0.0
+torch==2.6.0
 
 # Scientific computing (REQUIRED)
 numpy>=1.21.0
