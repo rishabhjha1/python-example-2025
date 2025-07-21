@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os
+import sys
 import numpy as np
 import pandas as pd
 import torch
@@ -9,10 +10,25 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings('ignore')
 
-from helper_code import *
+# Try to import scipy for signal processing
+try:
+    from scipy import signal as scipy_signal
+    SCIPY_AVAILABLE = True
+except ImportError:
+    print("Warning: scipy not available. Signal filtering will be disabled.")
+    SCIPY_AVAILABLE = False
+
+# Import helper code - make sure helper_code.py is in the same directory
+try:
+    from helper_code import *
+except ImportError as e:
+    print(f"Error importing helper_code: {e}")
+    print("Make sure helper_code.py is in the same directory as this script.")
+    sys.exit(1)
 
 # Configuration based on PhysioNet Challenge analysis
 class Config:
@@ -207,7 +223,7 @@ def load_data_with_sources(data_folder, verbose):
     sources = []
     
     try:
-        # Find all records
+        # Find all records using helper_code function
         records = find_records(data_folder)
         if verbose:
             print(f"Found {len(records)} records")
@@ -222,7 +238,7 @@ def load_data_with_sources(data_folder, verbose):
             try:
                 record_path = os.path.join(data_folder, record_name)
                 
-                # Load signal and header
+                # Load signal and header using helper_code functions
                 signal, fields = load_signals(record_path)
                 header = load_header(record_path)
                 
@@ -234,7 +250,7 @@ def load_data_with_sources(data_folder, verbose):
                 if processed_signal is None:
                     continue
                 
-                # Extract label
+                # Extract label using helper_code function
                 label = load_label(record_path)
                 if label is None:
                     continue
@@ -282,13 +298,15 @@ def determine_source(record_path, header):
     else:
         # Try to infer from header if available
         try:
-            comments = get_comments(header)
-            if any('sami' in str(c).lower() for c in comments):
-                return 'samitrop'
-            elif any('ptb' in str(c).lower() for c in comments):
-                return 'ptbxl'
-            elif any('code' in str(c).lower() for c in comments):
-                return 'code15'
+            # Use helper_code function if available
+            if hasattr(sys.modules.get('helper_code'), 'get_comments'):
+                comments = get_comments(header)
+                if any('sami' in str(c).lower() for c in comments):
+                    return 'samitrop'
+                elif any('ptb' in str(c).lower() for c in comments):
+                    return 'ptbxl'
+                elif any('code' in str(c).lower() for c in comments):
+                    return 'code15'
         except:
             pass
     
@@ -322,8 +340,9 @@ def process_signal_frequency_agnostic(signal, source):
         # Robust normalization per lead
         signal = normalize_signal_robust(signal)
         
-        # Remove any residual frequency-related artifacts
-        signal = remove_frequency_artifacts(signal)
+        # Remove any residual frequency-related artifacts (if scipy available)
+        if SCIPY_AVAILABLE:
+            signal = remove_frequency_artifacts(signal)
         
         # Transpose for PyTorch (leads, time_steps)
         signal = signal.T  # Shape: (12, signal_length)
@@ -356,10 +375,11 @@ def resample_to_duration(signal, target_length):
 def remove_frequency_artifacts(signal):
     """
     Remove artifacts that might be frequency-dependent
+    Only works if scipy is available
     """
-    # Remove very high and very low frequency components that might be sampling-related
-    from scipy import signal as scipy_signal
-    
+    if not SCIPY_AVAILABLE:
+        return signal
+        
     try:
         # Design a band-pass filter to remove frequency artifacts
         # Keep only ECG-relevant frequencies (0.5-40 Hz equivalent in normalized domain)
@@ -371,7 +391,7 @@ def remove_frequency_artifacts(signal):
         
         for i in range(signal.shape[1]):
             signal[:, i] = scipy_signal.filtfilt(b, a, signal[:, i])
-    except:
+    except Exception as e:
         # If filtering fails, continue without it
         pass
     
@@ -423,7 +443,6 @@ def train_improved_model(signals, labels, sources, model_folder, verbose):
                 print(f"{source}: {len(source_labels)} samples, {pos_rate:.1f}% positive")
     
     # Stratified split maintaining source distribution
-    from sklearn.model_selection import train_test_split
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
@@ -663,3 +682,10 @@ def run_model(record, model_data, verbose=False):
         if verbose:
             print(f"Error in run_model: {e}")
         return 0, 0.05
+
+# Entry point for testing
+if __name__ == "__main__":
+    print("Frequency-Agnostic Chagas Detection Model")
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"Device: {Config.DEVICE}")
+    print(f"SciPy available: {SCIPY_AVAILABLE}")
