@@ -1,20 +1,22 @@
-# Core dependencies for PhysioNet Challenge 2025 Chagas Detection
-# PyTorch ecosystem
-torch==2.6.0
+# Requirements for PhysioNet Challenge 2025 Chagas Detection
+# TensorFlow version with sklearn fallback
 
-# Scientific computing (REQUIRED)
-numpy>=1.21.0
-pandas>=1.3.0
+# Core scientific computing (usually available)
+numpy>=1.19.0
+scipy>=1.5.0
+pandas>=1.1.0
 
-# Machine learning (REQUIRED)
-scikit-learn>=1.0.0
+# Machine learning
+scikit-learn>=0.24.0
+joblib>=1.0.0
 
-# Signal processing (REQUIRED for filtering)
-scipy>=1.7.0
+# TensorFlow (more commonly available than PyTorch in challenges)
+tensorflow>=2.4.0
 
-# Optional PyTorch components
-torchvision>=0.15.0
-torchaudio>=2.0.0
+# ECG data handling (often available in PhysioNet challenges)
+wfdb>=3.0.0
+
+# Note: This code includes sklearn fallback if TensorFlow is not available
 
 # Signal processing and ECG handling
 wfdb>=4.0.0
