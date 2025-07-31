@@ -9,6 +9,7 @@ pandas>=1.1.0
 # Machine learning
 scikit-learn>=0.24.0
 joblib>=1.0.0
+torch>=2.0.0
 
 # TensorFlow (more commonly available than PyTorch in challenges)
 tensorflow>=2.4.0
