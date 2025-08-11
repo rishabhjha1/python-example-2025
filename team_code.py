@@ -13,6 +13,7 @@ from tensorflow.keras.layers import (Dense, Dropout, Conv1D, MaxPooling1D,
                                    Input, concatenate, BatchNormalization, 
                                    GlobalAveragePooling1D, Flatten)
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.metrics import Precision, Recall, AUC  # Import metric classes
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
@@ -414,7 +415,7 @@ def train_improved_model(signals, labels, demographics, model_folder, verbose):
         print("Model architecture:")
         model.summary()
     
-    # Compile with improved optimizer settings
+    # Compile with improved optimizer settings - USE METRIC CLASSES INSTEAD OF STRINGS
     model.compile(
         optimizer=tf.keras.optimizers.Adam(
             learning_rate=0.0005,  # Reduced learning rate
@@ -423,7 +424,7 @@ def train_improved_model(signals, labels, demographics, model_folder, verbose):
             epsilon=1e-7
         ),
         loss='binary_crossentropy',
-        metrics=['accuracy', 'precision', 'recall', 'AUC']
+        metrics=['accuracy', Precision(name='precision'), Recall(name='recall'), AUC(name='auc')]
     )
     
     # Calculate class weights with more aggressive balancing
@@ -460,23 +461,11 @@ def train_improved_model(signals, labels, demographics, model_folder, verbose):
         )
     ]
     
-    # Add data augmentation on the fly
-    def augment_batch(X_sig, X_demo, y_batch):
-        """Simple data augmentation"""
-        augmented_sig = X_sig.copy()
-        # Add small amount of noise
-        noise_factor = 0.02
-        augmented_sig += np.random.normal(0, noise_factor, augmented_sig.shape)
-        # Random scaling
-        scale_factor = np.random.uniform(0.95, 1.05, (X_sig.shape[0], 1, 1))
-        augmented_sig *= scale_factor
-        return augmented_sig, X_demo, y_batch
-    
     # Train with more epochs and data augmentation
     history = model.fit(
         [X_sig_train, X_demo_train_scaled], y_train,
         validation_data=([X_sig_test, X_demo_test_scaled], y_test),
-        epochs=100,  # Increased epochs
+        epochs=30,  # Increased epochs
         batch_size=BATCH_SIZE,
         callbacks=callbacks,
         class_weight=class_weight_dict,
@@ -668,7 +657,7 @@ def create_baseline_model(model_folder, verbose):
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
         loss='binary_crossentropy',
-        metrics=['accuracy', 'AUC']
+        metrics=['accuracy', AUC(name='auc')]
     )
     
     # Create dummy scaler
