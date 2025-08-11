@@ -1,8 +1,3 @@
-#!/usr/bin/env python
-
-# Improved Chagas disease detection model
-# Simplified and focused on robust feature extraction
-
 import os
 import numpy as np
 import pandas as pd
@@ -13,7 +8,6 @@ from tensorflow.keras.layers import (Dense, Dropout, Conv1D, MaxPooling1D,
                                    Input, concatenate, BatchNormalization, 
                                    GlobalAveragePooling1D, Flatten)
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.metrics import Precision, Recall, AUC  # Import metric classes
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
@@ -27,7 +21,7 @@ from helper_code import *
 TARGET_SAMPLING_RATE = 400  # Match most common sampling rate in datasets
 TARGET_SIGNAL_LENGTH = 2048  # Power of 2 for efficiency, ~5 seconds at 400Hz
 MAX_SAMPLES = 10000  # Reasonable limit for training
-BATCH_SIZE = 16  # Reduced for better gradient updates
+BATCH_SIZE = 32
 NUM_LEADS = 12
 
 def train_model(data_folder, model_folder, verbose):
@@ -311,25 +305,22 @@ def resample_signal_simple(signal, target_length):
 
 def normalize_signal_robust(signal):
     """
-    Robust signal normalization with improved scaling
+    Robust signal normalization
     """
     # Remove baseline per lead
     for i in range(signal.shape[1]):
         # Remove DC component
-        signal[:, i] = signal[:, i] - np.median(signal[:, i])  # Use median instead of mean for robustness
+        signal[:, i] = signal[:, i] - np.mean(signal[:, i])
         
-        # Robust scaling using standard deviation with outlier clipping
-        std_val = np.std(signal[:, i])
-        if std_val > 1e-6:
-            # Clip outliers before normalization
-            signal[:, i] = np.clip(signal[:, i], 
-                                 np.percentile(signal[:, i], 1),
-                                 np.percentile(signal[:, i], 99))
-            # Normalize
-            signal[:, i] = signal[:, i] / (std_val + 1e-6)
+        # Robust scaling using IQR
+        q25, q75 = np.percentile(signal[:, i], [25, 75])
+        iqr = q75 - q25
         
-        # Final clipping
-        signal[:, i] = np.clip(signal[:, i], -8, 8)  # Slightly tighter clipping
+        if iqr > 1e-6:  # Avoid division by zero
+            signal[:, i] = signal[:, i] / (iqr + 1e-6)
+        
+        # Clip extreme values
+        signal[:, i] = np.clip(signal[:, i], -10, 10)
     
     return signal
 
@@ -398,9 +389,9 @@ def train_improved_model(signals, labels, demographics, model_folder, verbose):
             print("Single class detected - creating balanced artificial data")
         X_signal, X_demo, y = create_balanced_data(X_signal, X_demo, y, verbose)
     
-    # Split data with stratification
+    # Split data
     X_sig_train, X_sig_test, X_demo_train, X_demo_test, y_train, y_test = train_test_split(
-        X_signal, X_demo, y, test_size=0.15, random_state=42, stratify=y  # Smaller test set for more training data
+        X_signal, X_demo, y, test_size=0.2, random_state=42, stratify=y
     )
     
     # Scale demographics
@@ -415,82 +406,48 @@ def train_improved_model(signals, labels, demographics, model_folder, verbose):
         print("Model architecture:")
         model.summary()
     
-    # Compile with improved optimizer settings - USE METRIC CLASSES INSTEAD OF STRINGS
+    # Compile with appropriate metrics
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(
-            learning_rate=0.0005,  # Reduced learning rate
-            beta_1=0.9,
-            beta_2=0.999,
-            epsilon=1e-7
-        ),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss='binary_crossentropy',
-        metrics=['accuracy', Precision(name='precision'), Recall(name='recall'), AUC(name='auc')]
+        metrics=['accuracy', 'precision', 'recall']
     )
     
-    # Calculate class weights with more aggressive balancing
+    # Calculate class weights
     try:
         class_weights = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
-        # Amplify minority class weight
-        if len(class_weights) == 2:
-            minority_weight = max(class_weights)
-            majority_weight = min(class_weights)
-            # Increase minority class weight by 50%
-            class_weights = [majority_weight, minority_weight * 1.5] if y_train.sum() < len(y_train) / 2 else [majority_weight * 1.5, minority_weight]
-        
         class_weight_dict = {i: weight for i, weight in enumerate(class_weights)}
         if verbose:
             print(f"Class weights: {class_weight_dict}")
     except:
         class_weight_dict = None
     
-    # Enhanced callbacks
+    # Callbacks
     callbacks = [
-        EarlyStopping(
-            monitor='val_auc',  # Monitor AUC instead of loss
-            patience=15,  # Increased patience
-            restore_best_weights=True,
-            mode='max'
-        ),
-        ReduceLROnPlateau(
-            monitor='val_auc',
-            factor=0.3,  # More aggressive reduction
-            patience=8,
-            min_lr=1e-7,
-            mode='max',
-            verbose=1 if verbose else 0
-        )
+        EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
     ]
     
-    # Train with more epochs and data augmentation
+    # Train
     history = model.fit(
         [X_sig_train, X_demo_train_scaled], y_train,
         validation_data=([X_sig_test, X_demo_test_scaled], y_test),
-        epochs=30,  # Increased epochs
+        epochs=75,
         batch_size=BATCH_SIZE,
         callbacks=callbacks,
         class_weight=class_weight_dict,
         verbose=1 if verbose else 0
     )
     
-    # Evaluate with multiple metrics
+    # Evaluate
     if verbose:
         y_pred = model.predict([X_sig_test, X_demo_test_scaled])
-        y_pred_binary = (y_pred > 0.4).astype(int).flatten()  # Lower threshold for better recall
+        y_pred_binary = (y_pred > 0.5).astype(int).flatten()
         
         print("\nTest Set Evaluation:")
         print(classification_report(y_test, y_pred_binary))
         print("Confusion Matrix:")
         print(confusion_matrix(y_test, y_pred_binary))
-        
-        # Additional metrics
-        from sklearn.metrics import roc_auc_score, average_precision_score
-        try:
-            auc_score = roc_auc_score(y_test, y_pred)
-            ap_score = average_precision_score(y_test, y_pred)
-            print(f"AUC Score: {auc_score:.4f}")
-            print(f"Average Precision: {ap_score:.4f}")
-        except:
-            pass
     
     # Save model
     save_improved_model(model_folder, model, demo_scaler, verbose)
@@ -502,49 +459,20 @@ def train_improved_model(signals, labels, demographics, model_folder, verbose):
 
 def create_balanced_data(X_signal, X_demo, y, verbose):
     """
-    Create balanced dataset when only one class is present with better augmentation
+    Create balanced dataset when only one class is present
     """
     original_class = y[0]
     n_samples = len(y)
     
-    # Create artificial samples of the opposite class with multiple techniques
-    artificial_signals = []
-    artificial_demo = []
-    
-    for i in range(n_samples):
-        # Original signal
-        sig = X_signal[i].copy()
-        dem = X_demo[i].copy()
-        
-        # Add multiple types of variation
-        # 1. Gaussian noise
-        sig += np.random.normal(0, 0.08, sig.shape)
-        
-        # 2. Time shifts
-        shift = np.random.randint(-20, 21)
-        if shift != 0:
-            sig = np.roll(sig, shift, axis=0)
-        
-        # 3. Amplitude scaling
-        scale = np.random.uniform(0.85, 1.15)
-        sig *= scale
-        
-        # 4. Lead-specific variations
-        for lead in range(sig.shape[1]):
-            if np.random.random() < 0.3:  # 30% chance per lead
-                lead_scale = np.random.uniform(0.9, 1.1)
-                sig[:, lead] *= lead_scale
-        
-        # Demographic variation
-        dem += np.random.normal(0, 0.03, dem.shape)
-        dem = np.clip(dem, 0, 1)
-        
-        artificial_signals.append(sig)
-        artificial_demo.append(dem)
-    
-    artificial_signals = np.array(artificial_signals)
-    artificial_demo = np.array(artificial_demo)
+    # Create artificial samples of the opposite class
+    artificial_signals = X_signal.copy()
+    artificial_demo = X_demo.copy()
     artificial_labels = np.full(n_samples, 1 - original_class)
+    
+    # Add noise to make artificial samples different
+    noise_scale = 0.1
+    artificial_signals += np.random.normal(0, noise_scale, artificial_signals.shape)
+    artificial_demo += np.random.normal(0, 0.05, artificial_demo.shape)
     
     # Combine original and artificial
     X_signal_balanced = np.vstack([X_signal, artificial_signals])
@@ -560,25 +488,23 @@ def create_balanced_data(X_signal, X_demo, y, verbose):
 
 def build_improved_model(signal_shape, demo_features):
     """
-    Enhanced ResNet-style architecture with improved regularization and architecture
+    ResNet-style architecture for ECG signal classification with demographic fusion.
+    Replaces shallow CNN with residual blocks to improve performance.
     """
     from tensorflow.keras.layers import Input, Conv1D, BatchNormalization, ReLU, Add, GlobalAveragePooling1D
-    from tensorflow.keras.layers import Dense, Dropout, concatenate, SpatialDropout1D
+    from tensorflow.keras.layers import Dense, Dropout, concatenate
     from tensorflow.keras.models import Model
 
-    def res_block(x, filters, kernel_size=7, stride=1, dropout_rate=0.1):
+    def res_block(x, filters, kernel_size=7, stride=1):
         shortcut = x
 
         # First Conv + BN + ReLU
-        x = Conv1D(filters, kernel_size=kernel_size, strides=stride, padding='same',
-                  kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
+        x = Conv1D(filters, kernel_size=kernel_size, strides=stride, padding='same')(x)
         x = BatchNormalization()(x)
         x = ReLU()(x)
-        x = SpatialDropout1D(dropout_rate)(x)  # Add spatial dropout
 
         # Second Conv + BN
-        x = Conv1D(filters, kernel_size=kernel_size, strides=1, padding='same',
-                  kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
+        x = Conv1D(filters, kernel_size=kernel_size, strides=1, padding='same')(x)
         x = BatchNormalization()(x)
 
         # Projection shortcut if dimensions mismatch
@@ -592,49 +518,29 @@ def build_improved_model(signal_shape, demo_features):
 
     # ECG Signal Input Branch
     signal_input = Input(shape=signal_shape, name='signal_input')
-    
-    # Initial convolution with larger kernel to capture ECG patterns
-    x = Conv1D(32, kernel_size=25, strides=2, padding='same',
-              kernel_regularizer=tf.keras.regularizers.l2(1e-4))(signal_input)
+    x = Conv1D(64, kernel_size=15, strides=2, padding='same')(signal_input)
     x = BatchNormalization()(x)
     x = ReLU()(x)
 
-    # Progressive feature extraction with residual blocks
-    x = res_block(x, 64, kernel_size=15, dropout_rate=0.1)
-    x = res_block(x, 64, kernel_size=11, dropout_rate=0.1)
-    x = res_block(x, 128, kernel_size=9, stride=2, dropout_rate=0.15)
-    x = res_block(x, 128, kernel_size=7, dropout_rate=0.15)
-    x = res_block(x, 256, kernel_size=5, stride=2, dropout_rate=0.2)
-    x = res_block(x, 256, kernel_size=3, dropout_rate=0.2)
+    # Residual Blocks
+    x = res_block(x, 64)
+    x = res_block(x, 128, stride=2)
+    x = res_block(x, 256, stride=2)
 
-    # Global pooling and feature compression
     x = GlobalAveragePooling1D()(x)
-    x = Dense(128, activation='relu', 
-              kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
-    x = Dropout(0.5)(x)
-    x = Dense(64, activation='relu',
-              kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
+    x = Dense(64, activation='relu')(x)
     x = Dropout(0.4)(x)
 
-    # Demographic Input Branch (enhanced)
+    # Demographic Input Branch
     demo_input = Input(shape=(demo_features,), name='demo_input')
-    demo_branch = Dense(32, activation='relu',
-                       kernel_regularizer=tf.keras.regularizers.l2(1e-4))(demo_input)
-    demo_branch = Dropout(0.3)(demo_branch)
-    demo_branch = Dense(16, activation='relu',
-                       kernel_regularizer=tf.keras.regularizers.l2(1e-4))(demo_branch)
+    demo_branch = Dense(16, activation='relu')(demo_input)
     demo_branch = Dropout(0.2)(demo_branch)
 
-    # Combine Branches with attention-like mechanism
+    # Combine Branches
     combined = concatenate([x, demo_branch])
-    combined = Dense(64, activation='relu',
-                    kernel_regularizer=tf.keras.regularizers.l2(1e-4))(combined)
-    combined = Dropout(0.4)(combined)
-    combined = Dense(32, activation='relu',
-                    kernel_regularizer=tf.keras.regularizers.l2(1e-4))(combined)
+    combined = Dense(32, activation='relu')(combined)
     combined = Dropout(0.3)(combined)
-    combined = Dense(16, activation='relu',
-                    kernel_regularizer=tf.keras.regularizers.l2(1e-4))(combined)
+    combined = Dense(16, activation='relu')(combined)
     combined = Dropout(0.2)(combined)
 
     output = Dense(1, activation='sigmoid')(combined)
@@ -655,9 +561,9 @@ def create_baseline_model(model_folder, verbose):
     model = build_improved_model((TARGET_SIGNAL_LENGTH, NUM_LEADS), 2)
     
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+        optimizer='adam',
         loss='binary_crossentropy',
-        metrics=['accuracy', AUC(name='auc')]
+        metrics=['accuracy']
     )
     
     # Create dummy scaler
@@ -687,8 +593,7 @@ def save_improved_model(model_folder, model, demo_scaler, verbose):
         'signal_length': TARGET_SIGNAL_LENGTH,
         'num_leads': NUM_LEADS,
         'sampling_rate': TARGET_SAMPLING_RATE,
-        'model_type': 'improved',
-        'threshold': 0.4  # Store the optimized threshold
+        'model_type': 'improved'
     }
     
     import json
@@ -725,13 +630,12 @@ def load_model(model_folder, verbose=False):
 
 def run_model(record, model_data, verbose=False):
     """
-    Run model on a single record with optimized threshold
+    Run model on a single record
     """
     try:
         model = model_data['model']
         demo_scaler = model_data['demo_scaler']
         config = model_data['config']
-        threshold = config.get('threshold', 0.4)  # Use stored threshold
         
         # Load and process signal
         try:
@@ -766,12 +670,12 @@ def run_model(record, model_data, verbose=False):
                 print(f"Prediction error: {e}")
             probability = 0.1  # Conservative default for Chagas (low prevalence)
         
-        # Convert to binary prediction using optimized threshold
-        binary_prediction = 1 if probability >= threshold else 0
+        # Convert to binary prediction
+        binary_prediction = 1 if probability >= 0.5 else 0
         
         return binary_prediction, probability
         
     except Exception as e:
         if verbose:
             print(f"Error in run_model: {e}")
-        return 0, 0.1
+        return 0, 0.1  
